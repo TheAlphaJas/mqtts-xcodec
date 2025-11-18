@@ -89,7 +89,7 @@ class Vocoder(nn.Module):
             sample = sample.to(self.device).long()
             sample = self._trim_special_tokens(sample)
             sample = sample.transpose(0, 1).unsqueeze(0)  # 1, num_quantizers, length
-            audio = self.model.decode(sample, bandwidth=self.bandwidth).audio_values.squeeze(0)
+            audio = self.model.decode(sample).audio_values.squeeze(0)
             decoded_audio.append(audio)
             lengths.append(audio.size(-1))
 
@@ -100,6 +100,7 @@ class Vocoder(nn.Module):
                 audio = F.pad(audio, (0, max_len - audio.size(-1)))
             padded.append(audio)
         batch_audio = torch.stack(padded, dim=0)
+        batch_audio = torch.clamp(batch_audio, -1.0, 1.0)
         if return_lengths:
             return batch_audio, torch.tensor(lengths, device=batch_audio.device)
         return batch_audio

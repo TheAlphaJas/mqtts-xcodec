@@ -6,6 +6,7 @@ from pytorch_lightning.strategies import DDPStrategy
 import argparse
 import json
 import os
+import math
 
 
 def main():
@@ -25,11 +26,10 @@ def main():
 
     #Optimizer
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--batch_size', type=float, default=150)
+    parser.add_argument('--batch_size', type=int, default=150)
     parser.add_argument('--train_bucket_size', type=int, default=8192)
-    parser.add_argument('--training_step', type=int, default=800000)
     parser.add_argument('--optim_flat_percent', type=float, default=0.0)
-    parser.add_argument('--warmup_step', type=int, default=50)
+    parser.add_argument('--warmup_epochs', type=float, default=1.0)
     parser.add_argument('--adam_beta1', type=float, default=0.9)
     parser.add_argument('--adam_beta2', type=float, default=0.98)
 
@@ -51,14 +51,15 @@ def main():
     parser.add_argument('--label_smoothing', type=float, default=0.0)
 
     #Trainer
-    parser.add_argument('--val_check_interval', type=int, default=5000)
-    parser.add_argument('--check_val_every_n_epoch', type=int, default=1)
+    parser.add_argument('--max_epochs', type=int, default=50)
+    parser.add_argument('--check_val_every_n_epoch', type=int, default=2)
     parser.add_argument('--precision', type=str, choices=['16-mixed', '32-true', "bf16-mixed"], default='32-true')
     parser.add_argument('--nworkers', type=int, default=16)
     parser.add_argument('--distributed', action='store_true')
     parser.add_argument('--accelerator', type=str, default='gpu')
     parser.add_argument('--version', type=int, default=None)
     parser.add_argument('--accumulate_grad_batches', type=int, default=1)
+    parser.add_argument('--save_every_n_epochs', type=int, default=1)
 
     #Sampling
     parser.add_argument('--use_repetition_token', action='store_true')
@@ -95,8 +96,7 @@ def main():
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.saving_path,
         filename=(fname_prefix+'{epoch}-{step}'),
-        every_n_train_steps=(None if args.val_check_interval == 1.0 else args.val_check_interval),
-        every_n_epochs=(None if args.check_val_every_n_epoch == 1 else args.check_val_every_n_epoch),
+        every_n_epochs=args.save_every_n_epochs,
         verbose=True,
         save_last=True
     )
@@ -106,17 +106,28 @@ def main():
     wrapper = Trainer(
         precision=args.precision,
         callbacks=[checkpoint_callback],
-        val_check_interval=args.val_check_interval,
         num_sanity_val_steps=0,
-        max_steps=args.training_step,
+        max_epochs=args.max_epochs,
         devices=(-1 if args.distributed else 1),
         accelerator=args.accelerator,
         use_distributed_sampler=False,
         accumulate_grad_batches=args.accumulate_grad_batches,
         logger=logger,
-        check_val_every_n_epoch=args.check_val_every_n_epoch
+        check_val_every_n_epoch=args.check_val_every_n_epoch,
+        strategy=strategy
     )
     model = Wav2TTS(args)
+    train_samples = len(model.data)
+    approx_steps_per_epoch = math.ceil(train_samples / max(1, args.batch_size))
+    eff_steps_per_epoch = math.ceil(approx_steps_per_epoch / max(1, args.accumulate_grad_batches))
+    est_total_steps = eff_steps_per_epoch * max(1, args.max_epochs)
+    print(f"[Setup] Training examples: {train_samples}")
+    print(f"[Setup] Max epochs: {args.max_epochs}, approx. steps/epoch: {approx_steps_per_epoch}")
+    print(f"[Setup] Grad accumulation: {args.accumulate_grad_batches}, optimizer steps/epoch: {eff_steps_per_epoch}, est. total optimizer steps: {est_total_steps}")
+    print(f"[Setup] Validation every {args.check_val_every_n_epoch} epoch(s); checkpoints every {args.save_every_n_epochs} epoch(s).")
+    lightning_est = getattr(wrapper, "estimated_stepping_batches", None)
+    if lightning_est is not None:
+        print(f"[Setup] Lightning estimated stepping batches: {lightning_est}")
     wrapper.fit(model, ckpt_path=args.resume_checkpoint)
 
 

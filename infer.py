@@ -68,9 +68,14 @@ def main():
             i_wavs.append(os.path.join(args.spkr_embedding_path, os.path.basename(speaker_path)[:-4] + '.npy'))
         else:
             audio, sr = sf.read(speaker_path)
-            assert sr == args.sample_rate
+            if sr != args.sample_rate:
+                raise ValueError(f"Expected {args.sample_rate} Hz audio but received {sr} Hz for {speaker_path}")
+            audio = np.asarray(audio, dtype=np.float32)
+            if audio.ndim > 1:
+                audio = np.mean(audio, axis=1)
             loudness = meter.integrated_loudness(audio)
             audio = pyln.normalize.loudness(audio, loudness, -20.0)
+            audio = np.clip(audio, -0.995, 0.995)
             i_wavs.append(audio)
         phones = phonemizer(sentence.strip().lower(), lang='en_us').replace('[', ' ').replace(']', ' ').split()
         phones = [''.join(i for i in phone if not i.isdigit()) for phone in phones if phone.strip()]
@@ -79,13 +84,15 @@ def main():
             print (f"Inferencing batch {written//args.batch_size+1}, total {len(input_file)//args.batch_size+1} baches.")
             synthetic = model(i_wavs, i_phones)
             for s in synthetic:
-                sf.write(os.path.join(args.outputdir, f'sentence-{written+1}-1.wav'), s, args.sample_rate)
+                clipped = np.clip(np.asarray(s, dtype=np.float32), -0.995, 0.995)
+                sf.write(os.path.join(args.outputdir, f'sentence-{written+1}-1.wav'), clipped, args.sample_rate)
                 written += 1
             i_wavs, i_phones = [], []
     if len(i_wavs) > 0:
         synthetic = model(i_wavs, i_phones)
         for s in synthetic:
-            sf.write(os.path.join(args.outputdir, f'sentence-{written+1}-1.wav'), s, args.sample_rate)
+            clipped = np.clip(np.asarray(s, dtype=np.float32), -0.995, 0.995)
+            sf.write(os.path.join(args.outputdir, f'sentence-{written+1}-1.wav'), clipped, args.sample_rate)
             written += 1
 
 

@@ -1,4 +1,5 @@
 import os
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -85,23 +86,47 @@ class Wav2TTS(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer_adam = optim.Adam(self.parameters(), lr=self.hp.lr, betas=(self.hp.adam_beta1, self.hp.adam_beta2))
-        #Learning rate scheduler
-        num_training_steps = self.hp.training_step
-        num_warmup_steps = self.hp.warmup_step
-        num_flat_steps = int(self.hp.optim_flat_percent * num_training_steps)
+        #Learning rate scheduler derived from epochs/est. steps
+        total_steps = getattr(self.trainer, "estimated_stepping_batches", None)
+        if total_steps is None:
+            total_steps = max(1, self.hp.max_epochs)
+        total_steps = int(total_steps)
+        steps_per_epoch = max(1, total_steps // max(1, self.hp.max_epochs))
+        num_warmup_steps = int(self.hp.warmup_epochs * steps_per_epoch)
+        num_warmup_steps = max(1, min(total_steps, num_warmup_steps)) if self.hp.warmup_epochs > 0 else 0
+        num_flat_steps = int(self.hp.optim_flat_percent * total_steps)
+        num_flat_steps = max(0, min(total_steps, num_flat_steps))
         def lambda_lr(current_step: int):
             if current_step < num_warmup_steps:
                 return float(current_step) / float(max(1, num_warmup_steps))
             elif current_step < (num_warmup_steps + num_flat_steps):
                 return 1.0
             return max(
-                0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - (num_warmup_steps + num_flat_steps)))
+                0.0, float(total_steps - current_step) / float(max(1, total_steps - (num_warmup_steps + num_flat_steps)))
             )
         scheduler_adam = {
             'scheduler': optim.lr_scheduler.LambdaLR(optimizer_adam, lambda_lr),
             'interval': 'step'
         }
         return [optimizer_adam], [scheduler_adam]
+
+    def on_fit_start(self):
+        if self.trainer is None:
+            return
+        total_examples = len(self.data)
+        approx_steps_per_epoch = math.ceil(total_examples / max(1, self.hp.batch_size))
+        eff_steps_per_epoch = math.ceil(approx_steps_per_epoch / max(1, self.hp.accumulate_grad_batches))
+        est_total_steps = eff_steps_per_epoch * max(1, self.hp.max_epochs)
+        lightning_steps = getattr(self.trainer, "estimated_stepping_batches", None)
+        self.print(
+            f"[Trainer] Starting fit: max_epochs={self.hp.max_epochs}, approx_steps_per_epoch={approx_steps_per_epoch}, "
+            f"optimizer_steps_per_epoch={eff_steps_per_epoch}, est_total_optimizer_steps={est_total_steps}"
+        )
+        if lightning_steps is not None:
+            self.print(f"[Trainer] Lightning estimated stepping batches: {lightning_steps}")
+        self.print(
+            f"[Trainer] Validation every {self.hp.check_val_every_n_epoch} epoch(s); checkpoints every {self.hp.save_every_n_epochs} epoch(s)."
+        )
 
     def training_step(self, batch, batch_idx):
         #Deal with speaker embedding
@@ -152,6 +177,8 @@ class Wav2TTS(pl.LightningModule):
             synthetic = self.vocoder(synthetic, norm_spkr).float()
             #Reconstructed Audio with vocoder
             reconstructed_gt = self.vocoder(q_s[:, 1:], norm_spkr).float()
+            synthetic = torch.clamp(synthetic, -1.0, 1.0)
+            reconstructed_gt = torch.clamp(reconstructed_gt, -1.0, 1.0)
             #Write files
             sw = self.logger.experiment
             sw.add_audio(f'generated/{batch_idx}', synthetic, self.global_step, self.hp.sample_rate)

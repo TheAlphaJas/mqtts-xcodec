@@ -51,6 +51,16 @@ class QuantizeDataset(data.Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def _load_audio(self, filepath):
+        audio, sampling_rate = sf.read(filepath)
+        if sampling_rate != self.hp.sample_rate:
+            raise ValueError(f"Expected {self.hp.sample_rate} Hz audio, but got {sampling_rate} Hz for {filepath}")
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+        audio = normalize(audio) * 0.95
+        return np.clip(audio, -0.995, 0.995)
+
     def __getitem__(self, i):
         dataname = self.dataset[i]
         _name = self.datasetbase[i]
@@ -59,8 +69,7 @@ class QuantizeDataset(data.Dataset):
         phonemes = [self.phoneset.index(ph) for ph in metadata['phoneme'].split() if ph in self.phoneset]
 
         if self.hp.speaker_embedding_dir is None:
-            audio, sampling_rate = sf.read(dataname)
-            audio = normalize(audio) * 0.95
+            audio = self._load_audio(dataname)
             speaker_embedding = self.spkr_embedding({'waveform': torch.FloatTensor(audio).unsqueeze(0), 'sample_rate': self.hp.sample_rate})
         else:
             speaker_embedding = os.path.join(self.hp.speaker_embedding_dir, os.path.splitext(_name)[0] + '.npy')
@@ -127,8 +136,7 @@ class QuantizeDatasetVal(QuantizeDataset):
 
     def __getitem__(self, i):
         speaker_embedding, quantization_s, quantization_e, phonemes, dataname = super().__getitem__(i)
-        audio, sampling_rate = sf.read(dataname)
-        audio = normalize(audio) * 0.95
+        audio = self._load_audio(dataname)
         return (
             torch.FloatTensor(speaker_embedding),
             torch.LongTensor(quantization_s),
