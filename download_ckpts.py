@@ -6,7 +6,7 @@ import subprocess
 # === Define Google Drive file IDs and target dirs ===
 files = {
     "config.json": ("1RkzZdSuXzWtSeAKccH45hGPUIusJLsCX", "ckpt/"),
-    "g_00600000.ckpt": ("1XOtGWUlem8cG6PCyTyjHHtC5VvUogvlE", "quantizer/checkpoints/"),
+    # "g_00600000.ckpt": ("1XOtGWUlem8cG6PCyTyjHHtC5VvUogvlE", "quantizer/checkpoints/"),
     "last.ckpt": ("1JtzeY3kGVks1O1NgwwrYPyPxfDli9kc8", "ckpt/")
 }
 

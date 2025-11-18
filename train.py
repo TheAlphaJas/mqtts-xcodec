@@ -110,7 +110,6 @@ wrapper = Trainer(
     max_steps=args.training_step,
     devices=(-1 if args.distributed else 1),
     accelerator=args.accelerator,
-    strategy=strategy,
     use_distributed_sampler=False,
     accumulate_grad_batches=args.accumulate_grad_batches,
     logger=logger,
