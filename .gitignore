@@ -1,3 +1,4 @@
-./datasets
-./Data-out
-./ckpt
+/datasets/
+/Data-out/
+/ckpt/
+/Testout/
