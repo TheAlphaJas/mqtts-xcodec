@@ -11,48 +11,49 @@ import json
 import numpy as np
 from collections import Counter
 
-parser = argparse.ArgumentParser()
 
-#Path
-parser.add_argument('--phonemizer_dict_path', type=str, required=True)
-parser.add_argument('--outputdir', type=str, required=True)
-parser.add_argument('--model_path', type=str, required=True)
-parser.add_argument('--input_path', type=str, required=True)
-parser.add_argument('--config_path', type=str, required=True)
-parser.add_argument('--spkr_embedding_path', type=str, default=None)
+def main():
+    parser = argparse.ArgumentParser()
 
-#Data
-parser.add_argument('--sample_rate', type=int, default=16000)
-parser.add_argument('--batch_size', type=int, default=32)
+    #Path
+    parser.add_argument('--phonemizer_dict_path', type=str, required=True)
+    parser.add_argument('--outputdir', type=str, required=True)
+    parser.add_argument('--model_path', type=str, required=True)
+    parser.add_argument('--input_path', type=str, required=True)
+    parser.add_argument('--config_path', type=str, required=True)
+    parser.add_argument('--spkr_embedding_path', type=str, default=None)
 
-#Sampling
-parser.add_argument('--use_repetition_gating', action='store_true')
-parser.add_argument('--repetition_penalty', type=float, default=1.0)
-parser.add_argument('--sampling_temperature', type=float, default=1.0)
-parser.add_argument('--top_k', type=int, default=-1)
-parser.add_argument('--min_top_k', type=int, default=1)
-parser.add_argument('--top_p', type=float, default=0.7)
-parser.add_argument('--length_penalty_max_length', type=int, default=50)
-parser.add_argument('--length_penalty_max_prob', type=float, default=0.8)
-parser.add_argument('--max_output_length', type=int, default=100000)
-parser.add_argument('--phone_context_window', type=int, default=4)
+    #Data
+    parser.add_argument('--sample_rate', type=int, default=16000)
+    parser.add_argument('--batch_size', type=int, default=32)
 
-#Speech Prior
-parser.add_argument('--clean_speech_prior', action='store_true')
-parser.add_argument('--prior_noise_level', type=float, default=1e-5)
-parser.add_argument('--prior_frame', type=int, default=3)
+    #Sampling
+    parser.add_argument('--use_repetition_gating', action='store_true')
+    parser.add_argument('--repetition_penalty', type=float, default=1.0)
+    parser.add_argument('--sampling_temperature', type=float, default=1.0)
+    parser.add_argument('--top_k', type=int, default=-1)
+    parser.add_argument('--min_top_k', type=int, default=1)
+    parser.add_argument('--top_p', type=float, default=0.7)
+    parser.add_argument('--length_penalty_max_length', type=int, default=50)
+    parser.add_argument('--length_penalty_max_prob', type=float, default=0.8)
+    parser.add_argument('--max_output_length', type=int, default=100000)
+    parser.add_argument('--phone_context_window', type=int, default=4)
 
-args = parser.parse_args()
+    #Speech Prior
+    parser.add_argument('--clean_speech_prior', action='store_true')
+    parser.add_argument('--prior_noise_level', type=float, default=1e-5)
+    parser.add_argument('--prior_frame', type=int, default=3)
 
-args.phoneset = ['<pad>', 'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'B', 'CH', 'D', 'DH', 'EH', 'ER', 'EY', 'F', 'G', 'HH', 'IH', 'IY', 'JH', 'K', 'L', 'M', 'N', 'NG', 'OW', 'OY', 'P', 'R', 'S', 'SH', 'T', 'TH', 'UH', 'UW', 'V', 'W', 'Y', 'Z', 'ZH', ',', '.']
+    args = parser.parse_args()
 
-with open(args.config_path, 'r') as f:
-    argdict = json.load(f)
-    assert argdict['sample_rate'] == args.sample_rate, f"Sampling rate not consistent, stated {args.sample_rate}, but the model is trained on {argdict['sample_rate']}"
-    argdict.update(args.__dict__)
-    args.__dict__ = argdict
+    args.phoneset = ['<pad>', 'AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'B', 'CH', 'D', 'DH', 'EH', 'ER', 'EY', 'F', 'G', 'HH', 'IH', 'IY', 'JH', 'K', 'L', 'M', 'N', 'NG', 'OW', 'OY', 'P', 'R', 'S', 'SH', 'T', 'TH', 'UH', 'UW', 'V', 'W', 'Y', 'Z', 'ZH', ',', '.']
 
-if __name__ == '__main__':
+    with open(args.config_path, 'r') as f:
+        argdict = json.load(f)
+        assert argdict['sample_rate'] == args.sample_rate, f"Sampling rate not consistent, stated {args.sample_rate}, but the model is trained on {argdict['sample_rate']}"
+        argdict.update(args.__dict__)
+        args.__dict__ = argdict
+
     Path(args.outputdir).mkdir(parents=True, exist_ok=True)
     meter = pyln.Meter(args.sample_rate)
     phonemizer = Phonemizer.from_checkpoint(args.phonemizer_dict_path)
@@ -86,3 +87,7 @@ if __name__ == '__main__':
         for s in synthetic:
             sf.write(os.path.join(args.outputdir, f'sentence-{written+1}-1.wav'), s, args.sample_rate)
             written += 1
+
+
+if __name__ == '__main__':
+    main()
