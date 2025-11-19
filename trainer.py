@@ -96,15 +96,19 @@ class Wav2TTS(pl.LightningModule):
 
         def lambda_lr(current_step: int):
             total_steps, num_warmup_steps, num_flat_steps = self._scheduler_factors()
+            # Warmup phase: linear ramp from 0 to 1
             if num_warmup_steps > 0 and current_step < num_warmup_steps:
-                return float(current_step) / float(max(1, num_warmup_steps))
+                # Start from small value, not 0
+                return max(0.01, float(current_step + 1) / float(max(1, num_warmup_steps)))
+            # Flat/plateau phase: stay at 1.0
             if num_warmup_steps <= current_step < (num_warmup_steps + num_flat_steps):
                 return 1.0
+            # Decay phase: linear decay
             decay_steps = total_steps - (num_warmup_steps + num_flat_steps)
             if decay_steps <= 0:
-                return 0.0
-            remaining = total_steps - current_step
-            return max(0.0, float(remaining) / float(decay_steps))
+                return 1.0  # If no decay steps, stay at 1.0
+            remaining = max(0, total_steps - current_step)
+            return max(0.1, float(remaining) / float(decay_steps))  # Don't go below 0.1
 
         scheduler_adam = {
             'scheduler': optim.lr_scheduler.LambdaLR(optimizer_adam, lambda_lr),
@@ -149,6 +153,21 @@ class Wav2TTS(pl.LightningModule):
         if self.trainer is None:
             return
         self._cached_total_steps = None
+        
+        # Check trainable parameters
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in self.parameters())
+        frozen_params = total_params - trainable_params
+        self.print(f"[Model] Trainable params: {trainable_params:,} | Frozen params: {frozen_params:,} | Total: {total_params:,}")
+        
+        # List frozen modules
+        frozen_modules = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                frozen_modules.append(name)
+        if frozen_modules:
+            self.print(f"[Model] Frozen parameters: {frozen_modules[:10]}")  # Show first 10
+        
         total_examples = len(self.data)
         approx_steps_per_epoch = math.ceil(total_examples / max(1, self.hp.batch_size))
         eff_steps_per_epoch = math.ceil(approx_steps_per_epoch / max(1, self.hp.accumulate_grad_batches))
@@ -168,11 +187,64 @@ class Wav2TTS(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self._log_optimizer_state(context=f"epoch_{self.current_epoch}")
+        # Store parameter snapshot for gradient tracking
+        if not hasattr(self, '_param_snapshot'):
+            self._param_snapshot = {}
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                self._param_snapshot[name] = param.data.clone()
+    
+    def on_before_optimizer_step(self, optimizer):
+        # Log gradient norms every 50 steps
+        if self.global_step % 50 == 0:
+            total_norm = 0.0
+            max_grad = 0.0
+            min_grad = float('inf')
+            grad_norms = {}
+            num_params_with_grad = 0
+            num_params_total = 0
+            for name, param in self.named_parameters():
+                if param.requires_grad:
+                    num_params_total += 1
+                    if param.grad is not None:
+                        num_params_with_grad += 1
+                        param_norm = param.grad.data.norm(2).item()
+                        total_norm += param_norm ** 2
+                        max_grad = max(max_grad, param.grad.abs().max().item())
+                        min_grad = min(min_grad, param.grad.abs().min().item())
+                        if param_norm > 0.1:  # Only log significant gradients
+                            grad_norms[name] = param_norm
+            total_norm = total_norm ** 0.5
+            self.print(f"[Gradient Step {self.global_step}] Total norm: {total_norm:.4f}, "
+                      f"Max grad: {max_grad:.6f}, Min grad: {min_grad:.6f}")
+            self.print(f"  Params with gradients: {num_params_with_grad}/{num_params_total}")
+            if len(grad_norms) > 0:
+                top_grads = sorted(grad_norms.items(), key=lambda x: x[1], reverse=True)[:5]
+                self.print(f"  Top 5 gradient norms: {[(n.split('.')[-1], f'{v:.4f}') for n, v in top_grads]}")
+    
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        # Track parameter updates every 100 steps
+        if self.global_step % 100 == 0 and hasattr(self, '_param_snapshot') and len(self._param_snapshot) > 0:
+            param_changes = {}
+            for name, param in self.named_parameters():
+                if param.requires_grad and name in self._param_snapshot:
+                    old_param = self._param_snapshot[name]
+                    change = (param.data - old_param).abs().mean().item()
+                    if change > 1e-8:
+                        param_changes[name] = change
+                    self._param_snapshot[name] = param.data.clone()
+            if len(param_changes) > 0:
+                top_changes = sorted(param_changes.items(), key=lambda x: x[1], reverse=True)[:5]
+                self.print(f"[Param Update Step {self.global_step}] Top parameter changes:")
+                for name, change in top_changes:
+                    self.print(f"  {name.split('.')[-2:]}: {change:.6e}")
+            else:
+                self.print(f"[WARNING Step {self.global_step}] NO PARAMETER UPDATES DETECTED!")
 
     def training_step(self, batch, batch_idx):
         #Deal with speaker embedding
         speaker_embedding = F.normalize(batch['speaker'], dim=-1)
-        speaker_embedding = self.spkr_linear(F.dropout(speaker_embedding, self.hp.speaker_embed_dropout))
+        speaker_embedding = self.spkr_linear(F.dropout(speaker_embedding, self.hp.speaker_embed_dropout, training=self.training))
         #Deal with phone segments
         phone_features = self.phone_embedding(batch['phone'])
         #Run decoder
@@ -180,10 +252,37 @@ class Wav2TTS(pl.LightningModule):
                                           batch['quantize_mask'], batch['phone_mask'])
         target = recons_segments['logits'][~batch['quantize_mask']].view(-1, self.n_decode_codes)
         labels = batch['tts_quantize_output'][~batch['quantize_mask']].view(-1)
+        
+        # Sanity check: ensure labels are in valid range
+        if batch_idx == 0 and self.global_step == 0:
+            label_min = labels.min().item()
+            label_max = labels.max().item()
+            self.print(f"[Data Sanity Check] Label range: [{label_min}, {label_max}], Expected: [0, {self.n_decode_codes-1}]")
+            if label_max >= self.n_decode_codes or label_min < 0:
+                self.print(f"[ERROR] Labels out of range! n_decode_codes={self.n_decode_codes}")
+        
         loss = self.cross_entropy(target, labels)
         acc = (target.argmax(-1) == labels).float().mean()
-        self.log("train/loss", loss, on_step=True, prog_bar=True)
-        self.log("train/acc", acc, on_step=True, prog_bar=True)
+        
+        # Debug logging every 50 steps
+        if batch_idx % 50 == 0:
+            self.print(f"[Step {self.global_step}] Loss: {loss.item():.4f}, Acc: {acc.item():.4f}, "
+                      f"Target shape: {target.shape}, Labels shape: {labels.shape}, "
+                      f"Num valid tokens: {(~batch['quantize_mask']).sum().item()}")
+            # Log learning rate
+            opt = self.optimizers()
+            if hasattr(opt, 'param_groups'):
+                lr = opt.param_groups[0]['lr']
+                self.print(f"[Step {self.global_step}] Current LR: {lr:.6e}")
+            # Sample some predictions vs labels
+            sample_size = min(10, len(labels))
+            pred_samples = target[:sample_size].argmax(-1).tolist()
+            label_samples = labels[:sample_size].tolist()
+            self.print(f"[Step {self.global_step}] Sample predictions: {pred_samples}")
+            self.print(f"[Step {self.global_step}] Sample labels:      {label_samples}")
+        
+        self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True)
+        self.log("train/acc", acc, on_step=True, prog_bar=True, logger=True)
         return loss
 
     def _log_optimizer_state(self, context: str):

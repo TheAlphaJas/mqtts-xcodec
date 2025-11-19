@@ -25,13 +25,14 @@ def main():
     parser.add_argument('--speaker_embedding_dir', type=str, default=None)
 
     #Optimizer
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--batch_size', type=int, default=150)
     parser.add_argument('--train_bucket_size', type=int, default=8192)
     parser.add_argument('--optim_flat_percent', type=float, default=0.0)
-    parser.add_argument('--warmup_epochs', type=float, default=1.0)
+    parser.add_argument('--warmup_epochs', type=float, default=2.0)
     parser.add_argument('--adam_beta1', type=float, default=0.9)
-    parser.add_argument('--adam_beta2', type=float, default=0.98)
+    parser.add_argument('--adam_beta2', type=float, default=0.999)
+    parser.add_argument('--gradient_clip_val', type=float, default=1.0)
 
     #Architecture
     parser.add_argument('--ffd_size', type=int, default=3072)
@@ -117,7 +118,9 @@ def main():
         accumulate_grad_batches=args.accumulate_grad_batches,
         logger=logger,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
-        strategy=strategy
+        strategy=strategy,
+        gradient_clip_val=args.gradient_clip_val,
+        gradient_clip_algorithm='norm'
     )
     model = Wav2TTS(args)
     train_samples = len(model.data)
