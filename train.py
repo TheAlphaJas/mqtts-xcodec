@@ -61,6 +61,10 @@ def main():
     parser.add_argument('--version', type=int, default=None)
     parser.add_argument('--accumulate_grad_batches', type=int, default=1)
     parser.add_argument('--save_every_n_epochs', type=int, default=1)
+    parser.add_argument('--enable_debug_logger', action='store_true', default=True,
+                        help='Enable structured debug logging to file (default: True)')
+    parser.add_argument('--debug_log_dir', type=str, default=None,
+                        help='Directory for debug logs (default: logs/debug)')
 
     #Sampling
     parser.add_argument('--use_repetition_token', action='store_true')
