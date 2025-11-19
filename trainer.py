@@ -425,6 +425,16 @@ class Wav2TTS(pl.LightningModule):
                 })
         return result
     
+    def on_train_epoch_end(self):
+        """Called at the end of each training epoch"""
+        # Log epoch completion
+        self.print(f"[Epoch {self.current_epoch}] Complete (step {self.global_step})")
+        
+        # Check if checkpoint should be saved this epoch
+        if hasattr(self.hp, 'save_every_n_epochs') and self.hp.save_every_n_epochs > 0:
+            if (self.current_epoch % self.hp.save_every_n_epochs) == 0:
+                self.print(f"[Checkpoint] Saving checkpoint for epoch {self.current_epoch}...")
+    
     def on_fit_end(self):
         """Flush debug logs and write summary at end of training"""
         self.debug_logger.flush()

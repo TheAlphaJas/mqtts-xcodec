@@ -91,6 +91,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Ensure checkpoint directory exists
+    os.makedirs(args.saving_path, exist_ok=True)
+    print(f"[Setup] Checkpoint directory: {os.path.abspath(args.saving_path)}")
+    
     with open(os.path.join(args.saving_path, 'config.json'), 'w') as f:
         json.dump(args.__dict__, f, indent=2)
 
@@ -106,8 +110,11 @@ def main():
         filename=(fname_prefix+'{epoch}-{step}'),
         every_n_epochs=args.save_every_n_epochs,
         verbose=True,
-        save_last=True
+        save_last=True,
+        save_on_train_epoch_end=True
     )
+    
+    print(f"[Setup] Checkpoints will be saved every {args.save_every_n_epochs} epoch(s) to: {args.saving_path}")
 
     logger = TensorBoardLogger(args.sampledir, name="VQ-TTS", version=args.version)
 
