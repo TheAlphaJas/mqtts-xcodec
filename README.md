@@ -63,7 +63,8 @@ python train.py \
      --datadir datasets/audios \
      --metapath datasets/train_q.json \
      --val_metapath datasets/dev_q.json \
-     --n_codes 1024 \
+     --n_codes 512 \
+     --source_n_codes 1024 \
      --use_repetition_token \
      --ar_layer 4 \
      --ar_ffd_size 1024 \

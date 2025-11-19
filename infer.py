@@ -26,6 +26,8 @@ def main():
     #Data
     parser.add_argument('--sample_rate', type=int, default=16000)
     parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--n_codes', type=int, default=512)
+parser.add_argument('--source_n_codes', type=int, default=1024)
 
     #Sampling
     parser.add_argument('--use_repetition_gating', action='store_true')

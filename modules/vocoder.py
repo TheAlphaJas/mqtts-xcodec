@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoFeatureExtractor, XcodecModel
+from typing import Optional
 
 
 class Vocoder(nn.Module):
@@ -12,7 +13,7 @@ class Vocoder(nn.Module):
     """
 
     def __init__(self, model_id: str = "hf-audio/xcodec-wavlm-more-data", bandwidth: float = 2.0,
-                 sample_rate: int = 16000):
+                 sample_rate: int = 16000, codebook_limit: Optional[int] = None):
         super().__init__()
         self.model_id = model_id
         self.bandwidth = bandwidth
@@ -20,6 +21,11 @@ class Vocoder(nn.Module):
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_id)
         self.sample_rate = sample_rate or getattr(self.feature_extractor, "sampling_rate", 16000)
         self.codebook_size = getattr(self.model.config, "codebook_size", 1024)
+        if codebook_limit is None:
+            codebook_limit = self.codebook_size
+        if codebook_limit > self.codebook_size:
+            raise ValueError(f"codebook_limit ({codebook_limit}) cannot exceed model codebook size ({self.codebook_size}).")
+        self.codebook_limit = codebook_limit
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad = False
@@ -59,7 +65,7 @@ class Vocoder(nn.Module):
         """
         if codes.dim() != 2:
             raise ValueError("Expect codes with shape (time, num_quantizers).")
-        mask = torch.any(codes >= self.codebook_size, dim=-1)
+        mask = torch.any(codes >= self.codebook_limit, dim=-1)
         if mask.any():
             first_invalid = torch.nonzero(mask, as_tuple=False)[0, 0]
             codes = codes[:first_invalid]
@@ -88,6 +94,7 @@ class Vocoder(nn.Module):
         for sample in batch:
             sample = sample.to(self.device).long()
             sample = self._trim_special_tokens(sample)
+            sample = self._upsample_codes(sample)
             sample = sample.transpose(0, 1).unsqueeze(0)  # 1, num_quantizers, length
             audio = self.model.decode(sample).audio_values.squeeze(0)
             decoded_audio.append(audio)
@@ -121,4 +128,20 @@ class Vocoder(nn.Module):
         if input_values.dim() == 2:
             input_values = input_values.unsqueeze(1)
         codes = self.model.encode(input_values, bandwidth=self.bandwidth).audio_codes
-        return codes.transpose(1, 2).long()
+        codes = codes.transpose(1, 2).long()
+        codes = self._downsample_codes(codes)
+        return codes
+
+    def _downsample_codes(self, codes: torch.Tensor) -> torch.Tensor:
+        if self.codebook_limit == self.codebook_size:
+            return codes
+        numerator = codes * self.codebook_limit
+        codes = numerator // max(1, self.codebook_size)
+        return torch.clamp(codes, 0, self.codebook_limit - 1)
+
+    def _upsample_codes(self, codes: torch.Tensor) -> torch.Tensor:
+        if self.codebook_limit == self.codebook_size:
+            return codes
+        numerator = codes * self.codebook_size
+        codes = numerator // max(1, self.codebook_limit)
+        return torch.clamp(codes, 0, self.codebook_size - 1)

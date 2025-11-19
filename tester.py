@@ -22,7 +22,12 @@ class Wav2TTS_infer(nn.Module):
         self.phone_embedding = nn.Embedding(len(self.hp.phoneset), hp.hidden_size, padding_idx=self.hp.phoneset.index('<pad>'))
         self.load()
         self.spkr_embedding = Inference("pyannote/embedding", window="whole")
-        self.vocoder = Vocoder(hp.codec_model_id, hp.codec_bandwidth, sample_rate=hp.sample_rate)
+        self.vocoder = Vocoder(
+            hp.codec_model_id,
+            hp.codec_bandwidth,
+            sample_rate=hp.sample_rate,
+            codebook_limit=hp.n_codes
+        )
 
     def load(self):
         state_dict = torch.load(self.hp.model_path)['state_dict']

@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--outputdir', type=str, default='vocoder_test', help='Directory to write comparison wavs.')
     parser.add_argument('--codec_model_id', type=str, default='hf-audio/xcodec-wavlm-more-data', help='HF model id.')
     parser.add_argument('--codec_bandwidth', type=float, default=2.0, help='Codec bandwidth for encoding.')
+    parser.add_argument('--n_codes', type=int, default=512, help='Effective codebook size to compare.')
     parser.add_argument('--sample_rate', type=int, default=16000, help='Expected sampling rate.')
     parser.add_argument('--k', type=int, default=10, help='Number of dev samples to evaluate.')
     parser.add_argument('--seed', type=int, default=1337, help='Random seed for sample selection.')
@@ -57,11 +58,16 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
-    vocoder = Vocoder(args.codec_model_id, args.codec_bandwidth, sample_rate=args.sample_rate)
+    vocoder = Vocoder(
+        args.codec_model_id,
+        args.codec_bandwidth,
+        sample_rate=args.sample_rate,
+        codebook_limit=args.n_codes
+    )
     vocoder = vocoder.to(device)
     vocoder.eval()
 
-    print(f"[VocoderTest] Using device: {device}, codec model: {args.codec_model_id}, bandwidth: {args.codec_bandwidth}")
+    print(f"[VocoderTest] Using device: {device}, codec model: {args.codec_model_id}, bandwidth: {args.codec_bandwidth}, n_codes={args.n_codes}")
     print(f"[VocoderTest] Sampling {num_samples} / {len(entries)} examples from {args.metapath}")
 
     for idx, rel_path in enumerate(selected, 1):

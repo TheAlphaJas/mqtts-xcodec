@@ -21,6 +21,8 @@ class Wav2TTS(pl.LightningModule):
     def __init__(self, hp):
         super().__init__()
         self.hp = hp
+        self._cached_total_steps = None
+        self._optimizer_state_log = {}
         self.data = QuantizeDataset(hp, hp.metapath)
         self.val_data = QuantizeDatasetVal(hp, hp.val_metapath)
         self.TTSdecoder = TTSDecoder(hp, len(self.data.phoneset))
@@ -32,7 +34,12 @@ class Wav2TTS(pl.LightningModule):
             self.load()
         else:
             self.apply(self.init_weights)
-        self.vocoder = Vocoder(hp.codec_model_id, hp.codec_bandwidth, sample_rate=hp.sample_rate)
+        self.vocoder = Vocoder(
+            hp.codec_model_id,
+            hp.codec_bandwidth,
+            sample_rate=hp.sample_rate,
+            codebook_limit=hp.n_codes
+        )
         self.vocoder.eval()
         for param in self.vocoder.parameters():
             param.requires_grad = False
@@ -86,33 +93,62 @@ class Wav2TTS(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer_adam = optim.Adam(self.parameters(), lr=self.hp.lr, betas=(self.hp.adam_beta1, self.hp.adam_beta2))
-        #Learning rate scheduler derived from epochs/est. steps
-        total_steps = getattr(self.trainer, "estimated_stepping_batches", None)
-        if total_steps is None:
-            total_steps = max(1, self.hp.max_epochs)
-        total_steps = int(total_steps)
-        steps_per_epoch = max(1, total_steps // max(1, self.hp.max_epochs))
-        num_warmup_steps = int(self.hp.warmup_epochs * steps_per_epoch)
-        num_warmup_steps = max(1, min(total_steps, num_warmup_steps)) if self.hp.warmup_epochs > 0 else 0
-        num_flat_steps = int(self.hp.optim_flat_percent * total_steps)
-        num_flat_steps = max(0, min(total_steps, num_flat_steps))
+
         def lambda_lr(current_step: int):
-            if current_step < num_warmup_steps:
+            total_steps, num_warmup_steps, num_flat_steps = self._scheduler_factors()
+            if num_warmup_steps > 0 and current_step < num_warmup_steps:
                 return float(current_step) / float(max(1, num_warmup_steps))
-            elif current_step < (num_warmup_steps + num_flat_steps):
+            if num_warmup_steps <= current_step < (num_warmup_steps + num_flat_steps):
                 return 1.0
-            return max(
-                0.0, float(total_steps - current_step) / float(max(1, total_steps - (num_warmup_steps + num_flat_steps)))
-            )
+            decay_steps = total_steps - (num_warmup_steps + num_flat_steps)
+            if decay_steps <= 0:
+                return 0.0
+            remaining = total_steps - current_step
+            return max(0.0, float(remaining) / float(decay_steps))
+
         scheduler_adam = {
             'scheduler': optim.lr_scheduler.LambdaLR(optimizer_adam, lambda_lr),
             'interval': 'step'
         }
         return [optimizer_adam], [scheduler_adam]
 
+    def _scheduler_factors(self):
+        total_steps = self._resolve_total_steps()
+        steps_per_epoch = max(1, total_steps // max(1, self.hp.max_epochs))
+        if self.hp.warmup_epochs > 0:
+            num_warmup_steps = int(self.hp.warmup_epochs * steps_per_epoch)
+            num_warmup_steps = max(1, min(total_steps, num_warmup_steps))
+        else:
+            num_warmup_steps = 0
+        num_flat_steps = int(self.hp.optim_flat_percent * total_steps)
+        num_flat_steps = max(0, min(total_steps, num_flat_steps))
+        return total_steps, num_warmup_steps, num_flat_steps
+
+    def _resolve_total_steps(self):
+        if self._cached_total_steps is not None:
+            return self._cached_total_steps
+        trainer = getattr(self, "trainer", None)
+        total_steps = None
+        if trainer is not None:
+            total_steps = getattr(trainer, "estimated_stepping_batches", None)
+            if total_steps is None:
+                num_batches = getattr(trainer, "num_training_batches", None)
+                if num_batches not in (None, float("inf")):
+                    accum = getattr(trainer, "accumulate_grad_batches", getattr(self.hp, 'accumulate_grad_batches', 1))
+                    epochs = trainer.max_epochs or self.hp.max_epochs or 1
+                    total_steps = math.ceil(num_batches / max(1, accum)) * max(1, epochs)
+        if total_steps is None:
+            dataset_size = len(self.data)
+            approx_batch = max(1, getattr(self.hp, 'batch_size', 1))
+            steps_per_epoch = math.ceil(dataset_size / approx_batch)
+            total_steps = max(1, steps_per_epoch * max(1, self.hp.max_epochs))
+        self._cached_total_steps = max(1, int(total_steps))
+        return self._cached_total_steps
+
     def on_fit_start(self):
         if self.trainer is None:
             return
+        self._cached_total_steps = None
         total_examples = len(self.data)
         approx_steps_per_epoch = math.ceil(total_examples / max(1, self.hp.batch_size))
         eff_steps_per_epoch = math.ceil(approx_steps_per_epoch / max(1, self.hp.accumulate_grad_batches))
@@ -124,9 +160,14 @@ class Wav2TTS(pl.LightningModule):
         )
         if lightning_steps is not None:
             self.print(f"[Trainer] Lightning estimated stepping batches: {lightning_steps}")
+        self.print(f"[Trainer] Scheduler resolved total_steps={self._resolve_total_steps()}")
         self.print(
             f"[Trainer] Validation every {self.hp.check_val_every_n_epoch} epoch(s); checkpoints every {self.hp.save_every_n_epochs} epoch(s)."
         )
+        self._log_optimizer_state(context="fit_start")
+
+    def on_train_epoch_start(self):
+        self._log_optimizer_state(context=f"epoch_{self.current_epoch}")
 
     def training_step(self, batch, batch_idx):
         #Deal with speaker embedding
@@ -144,6 +185,29 @@ class Wav2TTS(pl.LightningModule):
         self.log("train/loss", loss, on_step=True, prog_bar=True)
         self.log("train/acc", acc, on_step=True, prog_bar=True)
         return loss
+
+    def _log_optimizer_state(self, context: str):
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return
+        optimizers = getattr(trainer, "optimizers", None)
+        if not optimizers:
+            return
+        for opt_idx, optimizer in enumerate(optimizers):
+            for group_idx, group in enumerate(optimizer.param_groups):
+                lr = float(group.get('lr', 0.0))
+                betas = group.get('betas')
+                wd = float(group.get('weight_decay', 0.0))
+                prev = self._optimizer_state_log.get((opt_idx, group_idx))
+                delta = None if prev is None else lr - prev
+                delta_str = "n/a" if delta is None else f"{delta:+.3e}"
+                beta_str = ""
+                if isinstance(betas, (tuple, list)) and len(betas) == 2:
+                    beta_str = f", betas=({betas[0]:.4f}, {betas[1]:.4f})"
+                self.print(
+                    f"[Optimizer] {context} opt{opt_idx}/group{group_idx}: lr={lr:.6e} (Δ {delta_str}){beta_str}, weight_decay={wd:.3g}"
+                )
+                self._optimizer_state_log[(opt_idx, group_idx)] = lr
 
     def on_validation_epoch_start(self):
         #For the first half samples, and random choose the rest half

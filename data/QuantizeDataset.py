@@ -77,6 +77,13 @@ class QuantizeDataset(data.Dataset):
 
         #Ground truth for TTS system
         quantization = np.array(metadata['quantization']).T # ..., 4
+        quantization = self._remap_codebook(quantization, dataname)
+        max_code = int(np.max(quantization)) if quantization.size else 0
+        if max_code >= self.hp.n_codes:
+            raise ValueError(
+                f"Found codec id {max_code} in {dataname} but n_codes={self.hp.n_codes}. "
+                "Increase --n_codes or regenerate metadata with the requested codebook size."
+            )
         #Add start token, end token
         start, end = np.full((1, self.hp.n_cluster_groups), self.hp.n_codes + 1, dtype=np.int16), np.full((1, self.hp.n_cluster_groups), self.hp.n_codes, dtype=np.int16)
         quantization_s = np.concatenate([start, quantization.copy()], 0)
@@ -129,6 +136,24 @@ class QuantizeDataset(data.Dataset):
             else:
                 output[k] = torch.FloatTensor(output[k])
         return output
+
+    def _remap_codebook(self, quantization, dataname):
+        source_n_codes = getattr(self.hp, 'source_n_codes', self.hp.n_codes)
+        target_n_codes = self.hp.n_codes
+        if source_n_codes == target_n_codes:
+            return quantization
+        if source_n_codes < target_n_codes:
+            raise ValueError(
+                f"source_n_codes ({source_n_codes}) must be >= n_codes ({target_n_codes}). "
+                f"Check configuration for {dataname}."
+            )
+        if target_n_codes <= 1:
+            raise ValueError("n_codes must be greater than 1 to perform codebook remapping.")
+        denom = max(1, source_n_codes - 1)
+        numer = max(1, target_n_codes - 1)
+        quantization = np.floor((quantization.astype(np.float32) * numer) / denom).astype(np.int16)
+        quantization = np.clip(quantization, 0, target_n_codes - 1)
+        return quantization
 
 class QuantizeDatasetVal(QuantizeDataset):
     def __len__(self):
