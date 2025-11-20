@@ -35,17 +35,21 @@ def main():
     parser.add_argument('--gradient_clip_val', type=float, default=1.0)
 
     #Architecture
-    parser.add_argument('--ffd_size', type=int, default=3072)
-    parser.add_argument('--hidden_size', type=int, default=768)
-    parser.add_argument('--enc_nlayers', type=int, default=4)
-    parser.add_argument('--dec_nlayers', type=int, default=2)
-    parser.add_argument('--nheads', type=int, default=12)
+    parser.add_argument('--ffd_size', type=int, default=2048, help='Reduced from 3072 for ~100M total params')
+    parser.add_argument('--hidden_size', type=int, default=512, help='Reduced from 768 for ~100M total params')
+    parser.add_argument('--enc_nlayers', type=int, default=3, help='Reduced from 4')
+    parser.add_argument('--dec_nlayers', type=int, default=3, help='Increased to 3 to balance, or keep 2')
+    parser.add_argument('--nheads', type=int, default=8, help='Reduced from 12')
     parser.add_argument('--ar_layer', type=int, default=1)
     parser.add_argument('--ar_ffd_size', type=int, default=1024)
     parser.add_argument('--ar_hidden_size', type=int, default=256)
     parser.add_argument('--ar_nheads', type=int, default=4)
     parser.add_argument('--aligner_softmax_temp', type=float, default=1.0)
     parser.add_argument('--layer_norm_eps', type=float, default=1e-5)
+    
+    #Vocoder Training
+    parser.add_argument('--freeze_vocoder', action='store_true', default=False, help='Freeze vocoder weights (default: False, trainable)')
+    parser.add_argument('--vocoder_lr', type=float, default=1e-5, help='Learning rate for vocoder fine-tuning')
 
     #Dropout
     parser.add_argument('--speaker_embed_dropout', type=float, default=0.0)
@@ -84,6 +88,7 @@ def main():
     #Losses
     parser.add_argument('--lambda_spk', type=float, default=1.0, help='Weight for Speaker Consistency Loss')
     parser.add_argument('--lambda_mos', type=float, default=0.0, help='Weight for MOS Loss (if applicable)')
+    parser.add_argument('--lambda_sisdr', type=float, default=0.0, help='Weight for SI-SDR Loss (computationally expensive)')
 
     #Data
     parser.add_argument('--sample_rate', type=int, default=16000)

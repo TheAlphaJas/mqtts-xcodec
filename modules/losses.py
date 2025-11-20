@@ -90,3 +90,54 @@ class MOSLoss(nn.Module):
             print(f"[MOSLoss] Error during calculation: {e}")
             return torch.zeros(audio_wavs.size(0), device=audio_wavs.device, requires_grad=True)
 
+class SISDRLoss(nn.Module):
+    """
+    Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) Loss.
+    Commonly used for speech separation and enhancement evaluation.
+    Negative SI-SDR is minimized.
+    """
+    def __init__(self, zero_mean=True, eps=1e-8):
+        super().__init__()
+        self.zero_mean = zero_mean
+        self.eps = eps
+
+    def forward(self, preds, target):
+        """
+        preds:  (B, T) or (B, 1, T) Estimate
+        target: (B, T) or (B, 1, T) Reference
+        """
+        if preds.dim() == 3:
+            preds = preds.squeeze(1)
+        if target.dim() == 3:
+            target = target.squeeze(1)
+            
+        assert preds.shape == target.shape, f"Shape mismatch: {preds.shape} vs {target.shape}"
+        
+        if self.zero_mean:
+            mean_preds = preds.mean(dim=-1, keepdim=True)
+            mean_target = target.mean(dim=-1, keepdim=True)
+            preds = preds - mean_preds
+            target = target - mean_target
+            
+        # Calculate scalar projection (alpha)
+        # alpha = <x, s> / <s, s>
+        dot = torch.sum(preds * target, dim=-1, keepdim=True)
+        s_energy = torch.sum(target ** 2, dim=-1, keepdim=True) + self.eps
+        alpha = dot / s_energy
+        
+        # Scaled target
+        e_target = alpha * target
+        
+        # Noise component
+        e_noise = preds - e_target
+        
+        # SI-SDR
+        # 10 * log10( ||e_target||^2 / ||e_noise||^2 )
+        target_energy = torch.sum(e_target ** 2, dim=-1) + self.eps
+        noise_energy = torch.sum(e_noise ** 2, dim=-1) + self.eps
+        
+        si_sdr = 10 * torch.log10(target_energy / noise_energy)
+        
+        # Return negative mean SI-SDR for minimization
+        return -si_sdr.mean()
+

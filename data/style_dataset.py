@@ -44,17 +44,22 @@ class StyleQuantizeDataset(QuantizeDataset):
             quantization_e, 
             phonemes, 
             dataname,
-            torch.FloatTensor(mel)
+            torch.FloatTensor(mel),
+            torch.FloatTensor(audio) # Add raw audio for SI-SDR
         )
 
     def seqCollate(self, batch):
-        # Extract standard batch items
-        base_batch = [b[:4] + (b[4],) for b in batch] # exclude mel
+        # Extract standard batch items (first 5)
+        base_batch = [b[:5] for b in batch] 
         output = super().seqCollate(base_batch)
         
         # Handle Mel
         mels = [b[5] for b in batch]
         max_mel_len = max([m.size(0) for m in mels])
+        
+        # Handle Audio (pad to max len)
+        audios = [b[6] for b in batch]
+        max_audio_len = max([a.size(0) for a in audios])
         
         # Pad Mels
         padded_mels = []
@@ -67,10 +72,18 @@ class StyleQuantizeDataset(QuantizeDataset):
             mask = torch.zeros(max_mel_len, dtype=torch.bool)
             mask[mel.size(0):] = True
             mel_masks.append(mask)
+        
+        # Pad Audio
+        padded_audios = []
+        for audio in audios:
+            pad_len = max_audio_len - audio.size(0)
+            padded_audio = torch.nn.functional.pad(audio, (0, pad_len))
+            padded_audios.append(padded_audio)
             
         output['mel'] = torch.stack(padded_mels) # (B, T, 80)
         output['mel'] = output['mel'].permute(0, 2, 1) # (B, 80, T) for StyleEncoder
         output['mel_mask'] = torch.stack(mel_masks)
+        output['audio'] = torch.stack(padded_audios) # (B, T_wav)
         
         return output
 

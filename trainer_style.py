@@ -10,7 +10,7 @@ from data.sampler import RandomBucketSampler
 from modules.styletts2_transformer import StyleTTSDecoder
 from modules.transformers import TransformerEncoderLayer, TransformerEncoder, TransformerDecoder, TransformerDecoderLayer
 from modules.vocoder import Vocoder
-from modules.losses import SpeakerConsistencyLoss, MOSLoss
+from modules.losses import SpeakerConsistencyLoss, MOSLoss, SISDRLoss
 from torch.utils import data
 import pytorch_lightning.core.module as pl
 import soundfile as sf
@@ -90,6 +90,7 @@ class StyleWav2TTS(pl.LightningModule):
         # Style vector dim is hidden_size (e.g. 768)
         self.spk_loss = SpeakerConsistencyLoss(style_dim=hp.hidden_size, spkr_dim=512)
         self.mos_loss = MOSLoss()
+        self.sisdr_loss = SISDRLoss()
         
         self.phone_embedding = nn.Embedding(len(self.data.phoneset), hp.hidden_size, padding_idx=self.data.phoneset.index('<pad>'))
         
@@ -103,9 +104,17 @@ class StyleWav2TTS(pl.LightningModule):
             sample_rate=hp.sample_rate,
             codebook_limit=hp.n_codes
         )
-        self.vocoder.eval()
-        for param in self.vocoder.parameters():
-            param.requires_grad = False
+        
+        if getattr(hp, 'freeze_vocoder', True):
+            self.vocoder.eval()
+            for param in self.vocoder.parameters():
+                param.requires_grad = False
+            self.print("[Model] Vocoder is FROZEN.")
+        else:
+            self.vocoder.train()
+            for param in self.vocoder.parameters():
+                param.requires_grad = True
+            self.print("[Model] Vocoder is TRAINABLE (fine-tuning enabled).")
 
     def load(self):
         state_dict = torch.load(self.hp.pretrained_path)['state_dict']
@@ -155,7 +164,29 @@ class StyleWav2TTS(pl.LightningModule):
         return dataset
 
     def configure_optimizers(self):
-        optimizer_adam = optim.Adam(self.parameters(), lr=self.hp.lr, betas=(self.hp.adam_beta1, self.hp.adam_beta2))
+        # Separate parameter groups for different learning rates
+        vocoder_params = []
+        main_params = []
+        
+        if not getattr(self.hp, 'freeze_vocoder', True):
+            vocoder_params = list(self.vocoder.parameters())
+            # Identify vocoder params by object identity
+            vocoder_param_ids = set(id(p) for p in vocoder_params)
+            main_params = [p for p in self.parameters() if id(p) not in vocoder_param_ids]
+        else:
+            main_params = list(self.parameters())
+            
+        param_groups = [
+            {'params': main_params, 'lr': self.hp.lr, 'betas': (self.hp.adam_beta1, self.hp.adam_beta2)}
+        ]
+        
+        if vocoder_params:
+            voc_lr = getattr(self.hp, 'vocoder_lr', 1e-5)
+            param_groups.append(
+                {'params': vocoder_params, 'lr': voc_lr, 'betas': (self.hp.adam_beta1, self.hp.adam_beta2)}
+            )
+            
+        optimizer_adam = optim.Adam(param_groups)
 
         def lambda_lr(current_step: int):
             total_steps, num_warmup_steps, num_flat_steps = self._scheduler_factors()
@@ -379,11 +410,87 @@ class StyleWav2TTS(pl.LightningModule):
         style_vec = recons_segments['style_vector']
         loss_spk = self.spk_loss(style_vec, gt_spkr_emb)
         
+        # 3. SI-SDR Loss (if using differentiable vocoder approximation or if we just want to monitor)
+        # Since vocoder is fixed and discrete, we can't backprop SI-SDR easily through the AR steps.
+        # But we can compute it for monitoring or if we add a differentiable path later.
+        # For now, calculating SI-SDR between GT audio and Vocoded GT audio (reconstruction upper bound)
+        # OR between GT audio and Vocoded Predicted Codes (inference approximation).
+        # Calculating fully differentiable SI-SDR requires Gumbel-Softmax codes -> Differentiable Vocoder.
+        # Assuming we just want to log it for now or optimize style encoder if applicable.
+        
+        # Let's calculate it on the Style Encoder's ability to reconstruct the style? 
+        # No, SI-SDR is waveform level.
+        
+        # Implementation:
+        # We can't cheaply generate waveform for the whole batch every step (expensive).
+        # So we'll compute SI-SDR only for logging or if weight > 0 and we accept the cost.
+        # Given the current architecture (discrete codes), we skip backprop for SI-SDR on the AR model.
+        # However, if we want to optimize the Style Encoder, we could potentially decode the GT codes with the predicted Style Vector?
+        # Let's try: Reconstruct GT audio using GT codes + Predicted Style Vector. 
+        # Compare this against GT audio using GT codes + GT Speaker Embedding (or just GT audio).
+        # This optimizes the Style Encoder to produce a style vector that makes the vocoder happy.
+        
+        loss_sisdr = torch.tensor(0.0, device=loss_ce.device)
+        lambda_sisdr = getattr(self.hp, 'lambda_sisdr', 0.0)
+        
+        if lambda_sisdr > 0 or (batch_idx % 50 == 0): # Calculate if weighted or for logging
+             # Reconstruct using GT codes (q_s) and Predicted Style Vector
+             # q_s is (B, T) indices. Vocoder needs indices.
+             # We use q_s[:, 1:] (remove start token)
+             codes_gt = batch['tts_quantize_input'][:, 1:]
+             
+             # Generate waveform (expensive!) - do it for a subset
+             sub_size = min(2, codes_gt.size(0))
+             codes_sub = codes_gt[:sub_size]
+             style_sub = style_vec[:sub_size]
+             gt_audio_sub = batch['audio'][:sub_size] if 'audio' in batch else None 
+             
+             if gt_audio_sub is not None:
+                 # Decode with vocoder
+                 # Note: Vocoder expects (B, n_quant, T_codes)
+                 # codes_sub is (B, T_codes). Need to expand to (B, n_quant, T_codes)?
+                 # Or is it (B, T_codes, n_quant)? 
+                 # Dataset seqCollate: qs is padded with constant_values=n_codes
+                 # qs is (B, T). It seems we are using 1 code per step here?
+                 # MQTTS usually uses multiple codes per step if n_cluster_groups > 1
+                 # Let's check data pipeline. 
+                 # QuantizeDataset: quantization is (T, 4). 
+                 # seqCollate: qs = np.pad(qs, [[0, max_len], [0,0]]) -> (B, T, 4)
+                 # BUT batch['tts_quantize_input'] is LongTensor(output[k]).
+                 # Wait, if qs is (B, T, 4), then codes_gt is (B, T, 4).
+                 
+                 # The vocoder wrapper expects: codes (B, T, n_q) or (B, n_q, T)?
+                 # Vocoder.forward: if dim==3 -> (B, T, groups). 
+                 # So codes_sub should be (B, T, 4).
+                 
+                 try:
+                     # Normalize style vector for vocoder if needed
+                     norm_style_sub = F.normalize(style_sub, dim=-1)
+                     
+                     rec_audio = self.vocoder(codes_sub, norm_style_sub) # (B, 1, T_wav)
+                     rec_audio = rec_audio.squeeze(1) # (B, T_wav)
+                     
+                     # Align lengths
+                     min_len = min(rec_audio.size(1), gt_audio_sub.size(1))
+                     rec_audio = rec_audio[:, :min_len]
+                     gt_audio_sub = gt_audio_sub[:, :min_len]
+                     
+                     # Calculate SI-SDR
+                     val_sisdr = self.sisdr_loss(rec_audio, gt_audio_sub)
+                     
+                     if lambda_sisdr > 0:
+                         loss_sisdr = val_sisdr
+                         
+                     # Log it
+                     self.log("train/sisdr", -val_sisdr, on_step=True, logger=True) # Log positive SI-SDR (higher is better)
+                     
+                 except Exception as e:
+                     print(f"SI-SDR Calc Error: {e}")
+
         # Combine losses
-        # Lambda for spk loss can be tuned. Starting with 1.0 or similar.
         lambda_spk = getattr(self.hp, 'lambda_spk', 1.0)
         
-        total_loss = loss_ce + lambda_spk * loss_spk
+        total_loss = loss_ce + lambda_spk * loss_spk + lambda_sisdr * loss_sisdr
         
         # Log training metrics every 10 steps
         if self.global_step % 10 == 0:
